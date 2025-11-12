@@ -1,4 +1,3 @@
-import collections
 import json
 import multiprocessing as mp
 import os
@@ -14,6 +13,7 @@ from torch.utils.data import Dataset
 from utils.eval_helper import (construct_bbox_corners, convert_pc_to_box,
                                eval_ref_one_sample, is_explicitly_view_dependent)
 from utils.label_utils import LabelConverter
+from utils.lfs_utils import ensure_not_lfs_pointer
 from collections import Counter
 
 class Referit3DDataset(Dataset, LoadScannetMixin, DataAugmentationMixin):
@@ -33,16 +33,32 @@ class Referit3DDataset(Dataset, LoadScannetMixin, DataAugmentationMixin):
             
         # load file
         anno_file = os.path.join(SCAN_FAMILY_BASE, 'annotations/refer/' + anno_type + '.jsonl')
-        split_file = os.path.join(SCAN_FAMILY_BASE, 'annotations/splits/scannetv2_'+ split + ".txt")
-        with open(split_file, 'r') as sf:
-            split_lines = [x.strip() for x in sf if x.strip()]
-        if split_lines and split_lines[0].startswith('version https://git-lfs.github.com/spec/v1'):
-            raise ValueError(
-                "The split file '{}' looks like a Git-LFS pointer. Please run "
-                "`git lfs pull dataset/scanfamily/annotations/splits` to download the actual list of scan ids."
-                .format(split_file)
+        split_file = os.path.join(
+            SCAN_FAMILY_BASE, f'annotations/splits/scannetv2_{split}.txt'
+        )
+        split_scan_ids = None
+        split_lines = []
+        if os.path.exists(split_file):
+            ensure_not_lfs_pointer(
+                split_file,
+                hint="Run `git lfs pull dataset/scanfamily/annotations/splits` to download the ScanNet split lists.",
             )
-        split_scan_ids = set(split_lines)
+            with open(split_file, 'r') as sf:
+                split_lines = [x.strip() for x in sf if x.strip()]
+            if split_lines:
+                first_line = split_lines[0]
+                if first_line.startswith('version https://git-lfs.github.com/spec/v1'):
+                    raise ValueError(
+                        f"The split file '{split_file}' looks like a Git-LFS pointer. "
+                        "Please run `git lfs pull dataset/scanfamily/annotations/splits` to download the actual list of scan ids."
+                    )
+                else:
+                    split_scan_ids = set(split_lines)
+        else:
+            print(
+                f"[Referit3DDataset] Warning: split file '{split_file}' not found. "
+                "Please ensure the ScanNet splits are downloaded. Falling back to using all annotations for now."
+            )
         self.scan_ids = set() # scan ids in data
         self.data = [] # scanrefer data
         def within_length_limit(tokens):
@@ -55,7 +71,7 @@ class Referit3DDataset(Dataset, LoadScannetMixin, DataAugmentationMixin):
 
         with jsonlines.open(anno_file, 'r') as f:
             for item in f:
-                if item['scan_id'] not in split_scan_ids:
+                if split_scan_ids is not None and item['scan_id'] not in split_scan_ids:
                     dropped_other_split += 1
                     continue
                 if within_length_limit(item['tokens']):
@@ -68,7 +84,7 @@ class Referit3DDataset(Dataset, LoadScannetMixin, DataAugmentationMixin):
             anno_file = os.path.join(SCAN_FAMILY_BASE, 'annotations/refer/' + 'sr3d+' + '.jsonl')
             with jsonlines.open(anno_file, 'r') as f:
                 for item in f:
-                    if item['scan_id'] not in split_scan_ids:
+                    if split_scan_ids is not None and item['scan_id'] not in split_scan_ids:
                         dropped_other_split += 1
                         continue
                     if within_length_limit(item['tokens']):
