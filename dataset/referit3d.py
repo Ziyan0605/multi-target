@@ -33,16 +33,29 @@ class Referit3DDataset(Dataset, LoadScannetMixin, DataAugmentationMixin):
             
         # load file
         anno_file = os.path.join(SCAN_FAMILY_BASE, 'annotations/refer/' + anno_type + '.jsonl')
-        split_file = os.path.join(SCAN_FAMILY_BASE, 'annotations/splits/scannetv2_'+ split + ".txt")
-        with open(split_file, 'r') as sf:
-            split_lines = [x.strip() for x in sf if x.strip()]
-        if split_lines and split_lines[0].startswith('version https://git-lfs.github.com/spec/v1'):
-            raise ValueError(
-                "The split file '{}' looks like a Git-LFS pointer. Please run "
-                "`git lfs pull dataset/scanfamily/annotations/splits` to download the actual list of scan ids."
-                .format(split_file)
+        split_file = os.path.join(
+            SCAN_FAMILY_BASE, f'annotations/splits/scannetv2_{split}.txt'
+        )
+        split_scan_ids = None
+        split_lines = []
+        if os.path.exists(split_file):
+            with open(split_file, 'r') as sf:
+                split_lines = [x.strip() for x in sf if x.strip()]
+            if split_lines:
+                first_line = split_lines[0]
+                if first_line.startswith('version https://git-lfs.github.com/spec/v1'):
+                    print(
+                        f"[Referit3DDataset] Warning: '{split_file}' looks like a Git-LFS pointer. "
+                        "Please run `git lfs pull dataset/scanfamily/annotations/splits` to restore the scene list. "
+                        "Falling back to using all annotations for now."
+                    )
+                else:
+                    split_scan_ids = set(split_lines)
+        else:
+            print(
+                f"[Referit3DDataset] Warning: split file '{split_file}' not found. "
+                "Please ensure the ScanNet splits are downloaded. Falling back to using all annotations for now."
             )
-        split_scan_ids = set(split_lines)
         self.scan_ids = set() # scan ids in data
         self.data = [] # scanrefer data
         def within_length_limit(tokens):
@@ -55,7 +68,7 @@ class Referit3DDataset(Dataset, LoadScannetMixin, DataAugmentationMixin):
 
         with jsonlines.open(anno_file, 'r') as f:
             for item in f:
-                if item['scan_id'] not in split_scan_ids:
+                if split_scan_ids is not None and item['scan_id'] not in split_scan_ids:
                     dropped_other_split += 1
                     continue
                 if within_length_limit(item['tokens']):
@@ -68,7 +81,7 @@ class Referit3DDataset(Dataset, LoadScannetMixin, DataAugmentationMixin):
             anno_file = os.path.join(SCAN_FAMILY_BASE, 'annotations/refer/' + 'sr3d+' + '.jsonl')
             with jsonlines.open(anno_file, 'r') as f:
                 for item in f:
-                    if item['scan_id'] not in split_scan_ids:
+                    if split_scan_ids is not None and item['scan_id'] not in split_scan_ids:
                         dropped_other_split += 1
                         continue
                     if within_length_limit(item['tokens']):
