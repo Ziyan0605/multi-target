@@ -4,6 +4,7 @@ import os
 import numpy as np
 import torch
 from scipy import sparse
+from utils.lfs_utils import ensure_not_lfs_pointer
 
 from utils.eval_helper import convert_pc_to_box
 
@@ -21,10 +22,25 @@ class LoadScannetMixin(object):
         for scan_id in scan_ids:
             # load inst
             if load_inst_info:
-                inst_labels = json.load(open(os.path.join(SCAN_FAMILY_BASE, 'scan_data', 'instance_id_to_name', '%s.json'%scan_id)))
+                inst_name_path = os.path.join(SCAN_FAMILY_BASE, 'scan_data', 'instance_id_to_name', f'{scan_id}.json')
+                ensure_not_lfs_pointer(
+                    inst_name_path,
+                    hint="Run `git lfs pull dataset/scanfamily/scan_data/instance_id_to_name` to download instance metadata.",
+                )
+                inst_labels = json.load(open(inst_name_path))
                 inst_labels = [self.cat2int[i] for i in inst_labels]
-                inst_locs = np.load(os.path.join(SCAN_FAMILY_BASE, 'scan_data', 'instance_id_to_loc', '%s.npy'%scan_id))
-                inst_colors = json.load(open(os.path.join(SCAN_FAMILY_BASE, 'scan_data', 'instance_id_to_gmm_color', '%s.json'%scan_id)))
+                inst_loc_path = os.path.join(SCAN_FAMILY_BASE, 'scan_data', 'instance_id_to_loc', f'{scan_id}.npy')
+                ensure_not_lfs_pointer(
+                    inst_loc_path,
+                    hint="Run `git lfs pull dataset/scanfamily/scan_data/instance_id_to_loc` to download instance boxes.",
+                )
+                inst_locs = np.load(inst_loc_path)
+                inst_color_path = os.path.join(SCAN_FAMILY_BASE, 'scan_data', 'instance_id_to_gmm_color', f'{scan_id}.json')
+                ensure_not_lfs_pointer(
+                    inst_color_path,
+                    hint="Run `git lfs pull dataset/scanfamily/scan_data/instance_id_to_gmm_color` to download instance colors.",
+                )
+                inst_colors = json.load(open(inst_color_path))
                 inst_colors = [np.concatenate(
                     [np.array(x['weights'])[:, None], np.array(x['means'])],
                     axis=1
@@ -38,7 +54,12 @@ class LoadScannetMixin(object):
                 scans[scan_id] = {}
                 
             # load pcd data
-            pcd_data = torch.load(os.path.join(SCAN_FAMILY_BASE, "scan_data", "pcd_with_global_alignment", '%s.pth'% scan_id))
+            pcd_path = os.path.join(SCAN_FAMILY_BASE, "scan_data", "pcd_with_global_alignment", f'{scan_id}.pth')
+            ensure_not_lfs_pointer(
+                pcd_path,
+                hint="Run `git lfs pull dataset/scanfamily/scan_data/pcd_with_global_alignment` to download point clouds.",
+            )
+            pcd_data = torch.load(pcd_path)
             points, colors, instance_labels = pcd_data[0], pcd_data[1], pcd_data[-1]
             colors = colors / 127.5 - 1
             pcds = np.concatenate([points, colors], 1)
@@ -69,8 +90,16 @@ class LoadScannetMixin(object):
                 obj_labels = np.load(obj_label_path)
                 obj_labels = [self.label_converter.nyu40id_to_id[int(l)] for l in obj_labels]
                 '''
-                obj_mask_path = os.path.join(MASK_BASE, str(scan_id) + ".mask" + ".npz")
-                obj_label_path = os.path.join(MASK_BASE, str(scan_id) + ".label" + ".npy")
+                obj_mask_path = os.path.join(MASK_BASE, f"{scan_id}.mask.npz")
+                obj_label_path = os.path.join(MASK_BASE, f"{scan_id}.label.npy")
+                ensure_not_lfs_pointer(
+                    obj_mask_path,
+                    hint="Run `git lfs pull dataset/scanfamily/save_mask` to download proposal masks.",
+                )
+                ensure_not_lfs_pointer(
+                    obj_label_path,
+                    hint="Run `git lfs pull dataset/scanfamily/save_mask` to download proposal labels.",
+                )
                 obj_pcds = []
                 obj_mask = np.array(sparse.load_npz(obj_mask_path).todense())[:50, :]
                 obj_labels = np.load(obj_label_path)[:50]
