@@ -28,8 +28,14 @@ def get_referit3d_dataset(split='train', **args):
 @registry.register_dataset("referit3d_task")
 def get_referit3d_task_dataset(split='train', tokenizer=None, txt_seq_length=50, pc_seq_length=80, **args):
     tokenizer = registry.get_language_model(tokenizer)()
-    dataset = Referit3DDataset(split=split, max_obj_len=pc_seq_length, **args)
-    return ScanFamilyDatasetWrapper(dataset=dataset, tokenizer=tokenizer, max_seq_length=txt_seq_length, max_obj_len=pc_seq_length)
+    anchor_seq_length = args.pop('anchor_seq_length', None)
+    dataset = Referit3DDataset(
+        split=split,
+        max_obj_len=pc_seq_length,
+        max_token_length=txt_seq_length,
+        **args,
+    )
+    return ScanFamilyDatasetWrapper(dataset=dataset, tokenizer=tokenizer, max_seq_length=txt_seq_length, max_obj_len=pc_seq_length, max_anchor_len=anchor_seq_length if anchor_seq_length is not None else pc_seq_length)
 
 @registry.register_dataset("scanqa")
 def get_scanqa_dataset(split='train', **args):

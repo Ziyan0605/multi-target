@@ -26,7 +26,13 @@ class GroundHeadV1(nn.Module):
             sem_cls_size, dropout=dropout
         )
         
-    def forward(self, txt_embeds, obj_embeds, obj_pre_embeds, obj_masks):
+    def forward(self, txt_embeds, obj_embeds, obj_pre_embeds, obj_masks, anchor_context=None):
+        if anchor_context is not None:
+            if anchor_context.dim() == 2:
+                anchor_context = anchor_context.unsqueeze(1)
+            anchor_context = anchor_context.expand(-1, obj_embeds.shape[1], -1)
+            obj_embeds = obj_embeds + anchor_context
+            obj_pre_embeds = obj_pre_embeds + anchor_context
         og3d_logits = self.og3d_head(obj_embeds).squeeze(2)
         og3d_logits = og3d_logits.masked_fill_(obj_masks.logical_not(), -float('inf'))
         txt_embeds = txt_embeds.detach()
