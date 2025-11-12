@@ -34,7 +34,15 @@ class Referit3DDataset(Dataset, LoadScannetMixin, DataAugmentationMixin):
         # load file
         anno_file = os.path.join(SCAN_FAMILY_BASE, 'annotations/refer/' + anno_type + '.jsonl')
         split_file = os.path.join(SCAN_FAMILY_BASE, 'annotations/splits/scannetv2_'+ split + ".txt")
-        split_scan_ids = set([x.strip() for x in open(split_file, 'r')])
+        with open(split_file, 'r') as sf:
+            split_lines = [x.strip() for x in sf if x.strip()]
+        if split_lines and split_lines[0].startswith('version https://git-lfs.github.com/spec/v1'):
+            raise ValueError(
+                "The split file '{}' looks like a Git-LFS pointer. Please run "
+                "`git lfs pull dataset/scanfamily/annotations/splits` to download the actual list of scan ids."
+                .format(split_file)
+            )
+        split_scan_ids = set(split_lines)
         self.scan_ids = set() # scan ids in data
         self.data = [] # scanrefer data
         def within_length_limit(tokens):
