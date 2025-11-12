@@ -15,8 +15,8 @@ module load Miniforge3
 eval "$(conda shell.bash hook)"
 conda activate 3dvista
 
-# 3. 切换到代码目录
-cd ~/3D-VisTA
+# 3. 切换到代码目录（保持与提交作业时的路径一致）
+cd "${SLURM_SUBMIT_DIR:-$PWD}"
 
 # 4. 确认 torch 已安装（可选，排查用）
 python3 -c "import torch; print('✅ PyTorch version:', torch.__version__)" || exit 1

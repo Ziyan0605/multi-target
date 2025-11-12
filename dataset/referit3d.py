@@ -1,4 +1,3 @@
-import collections
 import json
 import multiprocessing as mp
 import os
@@ -14,39 +13,104 @@ from torch.utils.data import Dataset
 from utils.eval_helper import (construct_bbox_corners, convert_pc_to_box,
                                eval_ref_one_sample, is_explicitly_view_dependent)
 from utils.label_utils import LabelConverter
+from utils.lfs_utils import ensure_not_lfs_pointer
 from collections import Counter
 
 class Referit3DDataset(Dataset, LoadScannetMixin, DataAugmentationMixin):
-    def __init__(self, split='train', anno_type='nr3d', max_obj_len=60, num_points=1024, pc_type='gt', sem_type='607', filter_lang=False, sr3d_plus_aug=False):
+    def __init__(self, split='train', anno_type='nr3d', max_obj_len=60, num_points=1024, pc_type='gt', sem_type='607', filter_lang=False, sr3d_plus_aug=False, max_token_length=None):
         # make sure all input params is valid
         # use ground truth for training
         # test can be both ground truth and non-ground truth
         assert pc_type in ['gt', 'pred']
         assert sem_type in ['607']
         assert split in ['train', 'val', 'test']
-        assert anno_type in ['nr3d', 'sr3d']
+        valid_anno_types = {'nr3d', 'sr3d', 'nr3d-multi'}
+        normalized_anno_type = anno_type.replace('_', '-')
+        assert normalized_anno_type in valid_anno_types
+        anno_type = normalized_anno_type
         if split == 'train':
             pc_type = 'gt'
             
         # load file
         anno_file = os.path.join(SCAN_FAMILY_BASE, 'annotations/refer/' + anno_type + '.jsonl')
-        split_file = os.path.join(SCAN_FAMILY_BASE, 'annotations/splits/scannetv2_'+ split + ".txt")
-        split_scan_ids = set([x.strip() for x in open(split_file, 'r')])
+        split_file = os.path.join(
+            SCAN_FAMILY_BASE, f'annotations/splits/scannetv2_{split}.txt'
+        )
+        split_scan_ids = None
+        split_lines = []
+        if os.path.exists(split_file):
+            split_is_ready = ensure_not_lfs_pointer(
+                split_file,
+                hint="Run `git lfs pull dataset/scanfamily/annotations/splits` to download the ScanNet split lists.",
+                strict=False,
+            )
+            if split_is_ready:
+                with open(split_file, 'r') as sf:
+                    split_lines = [x.strip() for x in sf if x.strip()]
+                if split_lines:
+                    split_scan_ids = set(split_lines)
+            else:
+                print(
+                    f"[Referit3DDataset] Warning: split file '{split_file}' is a Git-LFS placeholder. "
+                    "Continuing with all annotations; please download the actual split list when available."
+                )
+        else:
+            print(
+                f"[Referit3DDataset] Warning: split file '{split_file}' not found. "
+                "Please ensure the ScanNet splits are downloaded. Falling back to using all annotations for now."
+            )
         self.scan_ids = set() # scan ids in data
         self.data = [] # scanrefer data
+        def within_length_limit(tokens):
+            if max_token_length is None:
+                return True
+            return len(tokens) <= max_token_length
+
+        dropped_long_utterances = 0
+        dropped_other_split = 0
+
         with jsonlines.open(anno_file, 'r') as f:
             for item in f:
-                if item['scan_id'] in split_scan_ids and len(item['tokens']) <= 24:
+                if split_scan_ids is not None and item['scan_id'] not in split_scan_ids:
+                    dropped_other_split += 1
+                    continue
+                if within_length_limit(item['tokens']):
                     self.scan_ids.add(item['scan_id'])
                     self.data.append(item)
+                else:
+                    dropped_long_utterances += 1
         # special for nr3d
         if sr3d_plus_aug and split == 'train':
             anno_file = os.path.join(SCAN_FAMILY_BASE, 'annotations/refer/' + 'sr3d+' + '.jsonl')
             with jsonlines.open(anno_file, 'r') as f:
                 for item in f:
-                    if item['scan_id'] in split_scan_ids and len(item['tokens']) <= 24:
+                    if split_scan_ids is not None and item['scan_id'] not in split_scan_ids:
+                        dropped_other_split += 1
+                        continue
+                    if within_length_limit(item['tokens']):
                         self.scan_ids.add(item['scan_id'])
                         self.data.append(item)
+                    else:
+                        dropped_long_utterances += 1
+
+        if len(self.data) == 0:
+            msg = [
+                f"Referit3DDataset loaded 0 samples for split '{split}' and anno_type '{anno_type}'.",
+                "Possible causes:",
+                "  1) The ScanNet split file only contains Git-LFS metadata instead of scene ids.",
+                "  2) All utterances were filtered out by max_token_length.",
+                "  3) The annotation file path is empty or malformed.",
+            ]
+            if max_token_length is not None:
+                msg.append(
+                    f"     - Current max_token_length={max_token_length}, dropped {dropped_long_utterances} long utterances."
+                )
+            raise ValueError("\n".join(msg))
+
+        if dropped_long_utterances > 0 and max_token_length is not None:
+            print(
+                f"[Referit3DDataset] Warning: filtered out {dropped_long_utterances} utterances longer than {max_token_length} tokens."
+            )
         
         # fill parameters
         self.split = split
@@ -82,6 +146,12 @@ class Referit3DDataset(Dataset, LoadScannetMixin, DataAugmentationMixin):
         tgt_object_name = item['instance_type']
         sentence = item['utterance']
         is_view_dependent = is_explicitly_view_dependent(item['tokens'])
+        anchor_original_ids = []
+        for anchor_group in item.get('anchor_ids', []):
+            for anchor_idx in anchor_group:
+                anchor_idx = int(anchor_idx)
+                if anchor_idx not in anchor_original_ids:
+                    anchor_original_ids.append(anchor_idx)
         
         # load pcds and labels
         if self.pc_type == 'gt':
@@ -105,22 +175,23 @@ class Referit3DDataset(Dataset, LoadScannetMixin, DataAugmentationMixin):
         # filter out background or language
         if self.filter_lang:
             if self.pc_type == 'gt':
-                selected_obj_idxs = [i for i, obj_label in enumerate(obj_labels) if (self.int2cat[obj_label] not in ['wall', 'floor', 'ceiling']) and (self.int2cat[obj_label] in sentence)]
-                if tgt_object_id not in selected_obj_idxs:
-                    selected_obj_idxs.append(tgt_object_id)
+                filtered_obj_indices = [i for i, obj_label in enumerate(obj_labels) if (self.int2cat[obj_label] not in ['wall', 'floor', 'ceiling']) and (self.int2cat[obj_label] in sentence)]
+                if tgt_object_id not in filtered_obj_indices:
+                    filtered_obj_indices.append(tgt_object_id)
             else:
-                selected_obj_idxs = [i for i in range(len(obj_pcds))]
+                filtered_obj_indices = [i for i in range(len(obj_pcds))]
         else:
             if self.pc_type == 'gt':
-                selected_obj_idxs = [i for i, obj_label in enumerate(obj_labels) if (self.int2cat[obj_label] not in ['wall', 'floor', 'ceiling'])]
+                filtered_obj_indices = [i for i, obj_label in enumerate(obj_labels) if (self.int2cat[obj_label] not in ['wall', 'floor', 'ceiling'])]
             else:
-                selected_obj_idxs = [i for i in range(len(obj_pcds))]
-        obj_pcds = [obj_pcds[id] for id in selected_obj_idxs]
-        obj_labels = [obj_labels[id] for id in selected_obj_idxs] 
-              
-        # build tgt object id and box 
+                filtered_obj_indices = [i for i in range(len(obj_pcds))]
+        obj_pcds = [obj_pcds[id] for id in filtered_obj_indices]
+        obj_labels = [obj_labels[id] for id in filtered_obj_indices]
+        obj_original_indices = list(filtered_obj_indices)
+
+        # build tgt object id and box
         if self.pc_type == 'gt':
-           tgt_object_id = selected_obj_idxs.index(tgt_object_id)
+           tgt_object_id = filtered_obj_indices.index(tgt_object_id)
            tgt_object_label = obj_labels[tgt_object_id]
            tgt_object_id_iou25_list = [tgt_object_id]
            tgt_object_id_iou50_list = [tgt_object_id]
@@ -146,39 +217,65 @@ class Referit3DDataset(Dataset, LoadScannetMixin, DataAugmentationMixin):
         assert(len(obj_pcds) == len(obj_labels))
         
         # crop objects 
+        anchor_filtered_indices = []
+        if anchor_original_ids:
+            for anchor_idx in anchor_original_ids:
+                if anchor_idx in obj_original_indices:
+                    anchor_filtered_indices.append(obj_original_indices.index(anchor_idx))
+
         if self.max_obj_len < len(obj_labels):
-            # select target first
+            selected_obj_idxs = []
+
+            def add_selected(idx):
+                if 0 <= idx < len(obj_labels) and idx not in selected_obj_idxs:
+                    selected_obj_idxs.append(idx)
+
             if tgt_object_id != -1:
-                selected_obj_idxs = [tgt_object_id]
-            selected_obj_idxs.extend(tgt_object_id_iou25_list)
-            selected_obj_idxs.extend(tgt_object_id_iou50_list)
-            selected_obj_idxs = list(set(selected_obj_idxs))
-            # select object with same semantic class with tgt_object
+                add_selected(tgt_object_id)
+            for idx in tgt_object_id_iou25_list:
+                add_selected(idx)
+            for idx in tgt_object_id_iou50_list:
+                add_selected(idx)
+            for idx in anchor_filtered_indices:
+                add_selected(idx)
+
             remained_obj_idx = []
             for kobj, klabel in enumerate(obj_labels):
                 if kobj not in selected_obj_idxs:
                     if klabel == tgt_object_label:
-                        selected_obj_idxs.append(kobj)
+                        add_selected(kobj)
                     else:
                         remained_obj_idx.append(kobj)
                 if len(selected_obj_idxs) == self.max_obj_len:
                     break
             if len(selected_obj_idxs) < self.max_obj_len:
                 random.shuffle(remained_obj_idx)
-                selected_obj_idxs += remained_obj_idx[:(self.max_obj_len - len(selected_obj_idxs))]
-            # reorganize ids
+                for idx in remained_obj_idx:
+                    add_selected(idx)
+                    if len(selected_obj_idxs) == self.max_obj_len:
+                        break
+            selected_obj_idxs = selected_obj_idxs[:self.max_obj_len]
             obj_pcds = [obj_pcds[i] for i in selected_obj_idxs]
             obj_labels = [obj_labels[i] for i in selected_obj_idxs]
+            obj_original_indices = [obj_original_indices[i] for i in selected_obj_idxs]
             if tgt_object_id != -1:
                 tgt_object_id = selected_obj_idxs.index(tgt_object_id)
-            tgt_object_id_iou25_list = [selected_obj_idxs.index(id) for id in tgt_object_id_iou25_list]
-            tgt_object_id_iou50_list = [selected_obj_idxs.index(id) for id in tgt_object_id_iou50_list]
-            assert len(obj_pcds) == self.max_obj_len
-            
+            tgt_object_id_iou25_list = [selected_obj_idxs.index(id) for id in tgt_object_id_iou25_list if id in selected_obj_idxs]
+            tgt_object_id_iou50_list = [selected_obj_idxs.index(id) for id in tgt_object_id_iou50_list if id in selected_obj_idxs]
+            anchor_filtered_indices = [selected_obj_idxs.index(id) for id in anchor_filtered_indices if id in selected_obj_idxs]
+            assert len(obj_pcds) == len(obj_labels)
+
         # rebuild tgt_object_id
         if tgt_object_id == -1:
             tgt_object_id = len(obj_pcds)
-            
+
+        anchor_final_indices = []
+        if anchor_original_ids:
+            original_to_final = {orig_idx: i for i, orig_idx in enumerate(obj_original_indices)}
+            for anchor_idx in anchor_original_ids:
+                if anchor_idx in original_to_final:
+                    anchor_final_indices.append(original_to_final[anchor_idx])
+
         # rotate obj
         rot_matrix = self.build_rotate_mat()
         
@@ -237,13 +334,14 @@ class Referit3DDataset(Dataset, LoadScannetMixin, DataAugmentationMixin):
             "obj_fts": obj_fts, # N, 6
             "obj_locs": obj_locs, # N, 3
             "obj_labels": obj_labels, # N,
-            "obj_boxes": obj_boxes, # N, 6 
+            "obj_boxes": obj_boxes, # N, 6
             "data_idx": item_id,
             "tgt_object_id_iou25": tgt_object_id_iou25,
-            "tgt_object_id_iou50": tgt_object_id_iou50, 
+            "tgt_object_id_iou50": tgt_object_id_iou50,
             'is_multiple': is_multiple,
             'is_view_dependent': is_view_dependent,
             'is_hard': is_hard,
+            'anchor_ids': torch.LongTensor(anchor_final_indices),
         }
     
         return data_dict
