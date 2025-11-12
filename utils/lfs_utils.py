@@ -1,4 +1,5 @@
 import os
+import warnings
 from typing import Optional
 
 
@@ -30,8 +31,13 @@ def is_lfs_pointer(path: str) -> bool:
     return prefix.startswith(_LFS_HEADER)
 
 
-def ensure_not_lfs_pointer(path: str, hint: Optional[str] = None) -> None:
-    """Raise a ``ValueError`` if ``path`` is a Git-LFS pointer.
+def ensure_not_lfs_pointer(
+    path: str,
+    hint: Optional[str] = None,
+    *,
+    strict: bool = True,
+) -> bool:
+    """Validate that ``path`` is not a Git-LFS pointer.
 
     Parameters
     ----------
@@ -40,6 +46,16 @@ def ensure_not_lfs_pointer(path: str, hint: Optional[str] = None) -> None:
     hint:
         Optional instruction string appended to the raised error to guide the
         user on how to fetch the missing artefact.
+    strict:
+        If ``True`` (default), raise a ``ValueError`` when a Git-LFS pointer is
+        detected. When ``False``, emit a warning and return ``False`` so callers
+        may decide how to recover.
+
+    Returns
+    -------
+    bool
+        ``True`` when the file exists and is not a pointer. ``False`` is
+        returned when the file is a pointer and ``strict`` is ``False``.
     """
 
     if not os.path.exists(path):
@@ -51,4 +67,10 @@ def ensure_not_lfs_pointer(path: str, hint: Optional[str] = None) -> None:
         ]
         if hint:
             message.append(hint)
-        raise ValueError(" ".join(message))
+        text = " ".join(message)
+        if strict:
+            raise ValueError(text)
+        warnings.warn(text)
+        return False
+
+    return True

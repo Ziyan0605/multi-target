@@ -39,21 +39,21 @@ class Referit3DDataset(Dataset, LoadScannetMixin, DataAugmentationMixin):
         split_scan_ids = None
         split_lines = []
         if os.path.exists(split_file):
-            ensure_not_lfs_pointer(
+            split_is_ready = ensure_not_lfs_pointer(
                 split_file,
                 hint="Run `git lfs pull dataset/scanfamily/annotations/splits` to download the ScanNet split lists.",
+                strict=False,
             )
-            with open(split_file, 'r') as sf:
-                split_lines = [x.strip() for x in sf if x.strip()]
-            if split_lines:
-                first_line = split_lines[0]
-                if first_line.startswith('version https://git-lfs.github.com/spec/v1'):
-                    raise ValueError(
-                        f"The split file '{split_file}' looks like a Git-LFS pointer. "
-                        "Please run `git lfs pull dataset/scanfamily/annotations/splits` to download the actual list of scan ids."
-                    )
-                else:
+            if split_is_ready:
+                with open(split_file, 'r') as sf:
+                    split_lines = [x.strip() for x in sf if x.strip()]
+                if split_lines:
                     split_scan_ids = set(split_lines)
+            else:
+                print(
+                    f"[Referit3DDataset] Warning: split file '{split_file}' is a Git-LFS placeholder. "
+                    "Continuing with all annotations; please download the actual split list when available."
+                )
         else:
             print(
                 f"[Referit3DDataset] Warning: split file '{split_file}' not found. "
