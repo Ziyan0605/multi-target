@@ -4,11 +4,12 @@ import torch
 from dataset.data_converter import *
 
 class ScanFamilyDatasetWrapper(torch.utils.data.Dataset):
-    def __init__(self, dataset, tokenizer, max_seq_length=80, max_obj_len=80):
+    def __init__(self, dataset, tokenizer, max_seq_length=80, max_obj_len=80, max_anchor_len=None):
         self.dataset = dataset
         self.tokenizer = tokenizer
         self.max_seq_length = max_seq_length
         self.max_obj_len = max_obj_len
+        self.max_anchor_len = max_anchor_len if max_anchor_len is not None else max_obj_len
     
     def __len__(self):
         return len(self.dataset)
@@ -23,7 +24,7 @@ class ScanFamilyDatasetWrapper(torch.utils.data.Dataset):
             return tensors
         shape = list(tensors.shape)
         shape[0] = lens - shape[0]
-        res = torch.ones(shape, dtype=tensors.dtype) * pad
+        res = torch.full(shape, pad, dtype=tensors.dtype)
         res = torch.cat((tensors, res), dim=0)
         return res
         
@@ -54,6 +55,19 @@ class ScanFamilyDatasetWrapper(torch.utils.data.Dataset):
             data_dict['tgt_object_id_iou25'] = self.pad_tensors(data_dict['tgt_object_id_iou25'], lens=self.max_obj_len, pad=0).long()
         if data_dict.get('tgt_object_id_iou50') != None:
             data_dict['tgt_object_id_iou50'] = self.pad_tensors(data_dict['tgt_object_id_iou50'], lens=self.max_obj_len, pad=0).long()
+        if data_dict.get('anchor_ids') is not None:
+            anchor_ids = data_dict['anchor_ids'].long()
+            max_anchor_len = self.max_anchor_len
+            anchor_mask = torch.zeros(max_anchor_len, dtype=torch.bool)
+            valid_len = min(anchor_ids.shape[0], max_anchor_len)
+            if valid_len > 0:
+                anchor_mask[:valid_len] = True
+            if anchor_ids.shape[0] < max_anchor_len:
+                anchor_ids = self.pad_tensors(anchor_ids, lens=max_anchor_len, pad=-1).long()
+            else:
+                anchor_ids = anchor_ids[:max_anchor_len]
+            data_dict['anchor_ids'] = anchor_ids
+            data_dict['anchor_masks'] = anchor_mask
         # build label for qa
         if "answer_label" in data_dict:
             data_dict['answer_label'] = data_dict['answer_label'].long() # N, C
