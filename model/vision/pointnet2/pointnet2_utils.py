@@ -11,11 +11,15 @@ from __future__ import (
     print_function,
     unicode_literals,
 )
-import torch
-from torch.autograd import Function
-import torch.nn as nn
+import math
 import os
 import sys
+import warnings
+
+import torch
+import torch.nn as nn
+from torch.autograd import Function
+
 import model.vision.pointnet2.pytorch_utils as pt_utils
 
 
@@ -25,14 +29,100 @@ except:
     import __builtin__ as builtins
 
 try:
-    import pointnet2._ext as _ext
+    import pointnet2._ext as _ext  # type: ignore[attr-defined]
+    _HAS_EXT = True
 except ImportError:
+    _ext = None  # type: ignore[assignment]
+    _HAS_EXT = False
+
     if not getattr(builtins, "__POINTNET2_SETUP__", False):
-        raise ImportError(
-            "Could not import _ext module.\n"
-            "Please see the setup instructions in the README: "
-            "https://github.com/erikwijmans/Pointnet2_PyTorch/blob/master/README.rst"
+        # Defer to a torch-only fallback implementation instead of hard failing so
+        # the repo can run without compiling the CUDA/CPP extension. This keeps the
+        # behaviour consistent across machines where building the extension may not
+        # be possible (e.g. headless CPU nodes).
+        warnings.warn(
+            "pointnet2._ext not found; falling back to slower PyTorch ops. "
+            "Install the compiled extension for better performance.",
+            RuntimeWarning,
         )
+
+
+def _torch_furthest_point_sample(xyz, npoint):
+    """Pure PyTorch furthest point sampling used as a fallback when the
+    custom CUDA/CPP ops are unavailable."""
+
+    device = xyz.device
+    B, N, _ = xyz.shape
+    centroids = torch.zeros(B, npoint, dtype=torch.long, device=device)
+    distance = torch.full((B, N), 1e10, device=device)
+    farthest = torch.randint(0, N, (B,), device=device)
+    batch_indices = torch.arange(B, dtype=torch.long, device=device)
+
+    for i in range(npoint):
+        centroids[:, i] = farthest
+        centroid = xyz[batch_indices, farthest, :].unsqueeze(1)
+        dist = torch.sum((xyz - centroid) ** 2, dim=-1)
+        distance = torch.minimum(distance, dist)
+        farthest = torch.max(distance, dim=-1)[1]
+
+    return centroids
+
+
+def _torch_gather_operation(features, idx):
+    B, C, N = features.shape
+    idx_expanded = idx.unsqueeze(1).expand(-1, C, -1)
+    return torch.gather(features, 2, idx_expanded)
+
+
+def _torch_grouping_operation(features, idx):
+    B, C, N = features.shape
+    S, K = idx.shape[1], idx.shape[2]
+    features_expand = features.unsqueeze(2).expand(-1, -1, S, -1)
+    idx_expand = idx.unsqueeze(1).expand(-1, C, -1, -1)
+    return torch.gather(features_expand, 3, idx_expand)
+
+
+def _torch_three_nn(unknown, known):
+    dist = torch.cdist(unknown, known, p=2)
+    dist, idx = torch.topk(dist, k=3, dim=-1, largest=False)
+    return dist, idx
+
+
+def _torch_three_interpolate(features, idx, weight):
+    B, C, N = features.shape
+    n = idx.size(1)
+    features_expand = features.unsqueeze(2).expand(-1, -1, n, -1)
+    idx_expand = idx.unsqueeze(1).expand(-1, C, -1, -1)
+    gathered = torch.gather(features_expand, 3, idx_expand)
+    weighted = gathered * weight.unsqueeze(1)
+    return weighted.sum(-1)
+
+
+def _torch_ball_query(radius, nsample, xyz, new_xyz):
+    B, S, _ = new_xyz.shape
+    N = xyz.size(1)
+    device = xyz.device
+    idx = torch.zeros(B, S, nsample, dtype=torch.long, device=device)
+
+    dist = torch.cdist(new_xyz, xyz, p=2)
+
+    for b in range(B):
+        for s in range(S):
+            dists = dist[b, s]
+            if radius is None or math.isinf(radius):
+                neighbours = torch.arange(N, device=device, dtype=torch.long)
+            else:
+                neighbours = torch.nonzero(dists <= radius, as_tuple=False).squeeze(-1)
+
+            if neighbours.numel() == 0:
+                neighbours = torch.topk(dists, k=1, largest=False).indices
+
+            count = min(neighbours.numel(), nsample)
+            idx[b, s, :count] = neighbours[:count]
+            if count < nsample:
+                idx[b, s, count:] = neighbours[count - 1]
+
+    return idx
 
 if False:
     # Workaround for type hints without depending on the `typing` module
@@ -50,247 +140,121 @@ class RandomDropout(nn.Module):
         return pt_utils.feature_dropout_no_scaling(X, theta, self.train, self.inplace)
 
 
-class FurthestPointSampling(Function):
-    @staticmethod
-    def forward(ctx, xyz, npoint):
-        # type: (Any, torch.Tensor, int) -> torch.Tensor
-        r"""
-        Uses iterative furthest point sampling to select a set of npoint features that have the largest
-        minimum distance
+if _HAS_EXT:
+    class FurthestPointSampling(Function):
+        @staticmethod
+        def forward(ctx, xyz, npoint):
+            fps_inds = _ext.furthest_point_sampling(xyz, npoint)
+            ctx.mark_non_differentiable(fps_inds)
+            return fps_inds
 
-        Parameters
-        ----------
-        xyz : torch.Tensor
-            (B, N, 3) tensor where N > npoint
-        npoint : int32
-            number of features in the sampled set
-
-        Returns
-        -------
-        torch.Tensor
-            (B, npoint) tensor containing the set
-        """
-        fps_inds = _ext.furthest_point_sampling(xyz, npoint)
-        ctx.mark_non_differentiable(fps_inds)
-        return fps_inds
-
-    @staticmethod
-    def backward(xyz, a=None):
-        return None, None
+        @staticmethod
+        def backward(xyz, a=None):
+            return None, None
 
 
-furthest_point_sample = FurthestPointSampling.apply
+    furthest_point_sample = FurthestPointSampling.apply
+
+    class GatherOperation(Function):
+        @staticmethod
+        def forward(ctx, features, idx):
+            _, C, N = features.size()
+            ctx.for_backwards = (idx, C, N)
+            return _ext.gather_points(features, idx)
+
+        @staticmethod
+        def backward(ctx, grad_out):
+            idx, C, N = ctx.for_backwards
+            grad_features = _ext.gather_points_grad(grad_out.contiguous(), idx, N)
+            return grad_features, None
 
 
-class GatherOperation(Function):
-    @staticmethod
-    def forward(ctx, features, idx):
-        # type: (Any, torch.Tensor, torch.Tensor) -> torch.Tensor
-        r"""
+    gather_operation = GatherOperation.apply
 
-        Parameters
-        ----------
-        features : torch.Tensor
-            (B, C, N) tensor
+    class ThreeNN(Function):
+        @staticmethod
+        def forward(ctx, unknown, known):
+            dist2, idx = _ext.three_nn(unknown, known)
+            return torch.sqrt(dist2), idx
 
-        idx : torch.Tensor
-            (B, npoint) tensor of the features to gather
-
-        Returns
-        -------
-        torch.Tensor
-            (B, C, npoint) tensor
-        """
-
-        _, C, N = features.size()
-
-        ctx.for_backwards = (idx, C, N)
-
-        return _ext.gather_points(features, idx)
-
-    @staticmethod
-    def backward(ctx, grad_out):
-        idx, C, N = ctx.for_backwards
-
-        grad_features = _ext.gather_points_grad(grad_out.contiguous(), idx, N)
-        return grad_features, None
+        @staticmethod
+        def backward(ctx, a=None, b=None):
+            return None, None
 
 
-gather_operation = GatherOperation.apply
+    three_nn = ThreeNN.apply
+
+    class ThreeInterpolate(Function):
+        @staticmethod
+        def forward(ctx, features, idx, weight):
+            B, c, m = features.size()
+            ctx.three_interpolate_for_backward = (idx, weight, m)
+            return _ext.three_interpolate(features, idx, weight)
+
+        @staticmethod
+        def backward(ctx, grad_out):
+            idx, weight, m = ctx.three_interpolate_for_backward
+            grad_features = _ext.three_interpolate_grad(
+                grad_out.contiguous(), idx, weight, m
+            )
+            return grad_features, None, None
 
 
-class ThreeNN(Function):
-    @staticmethod
-    def forward(ctx, unknown, known):
-        # type: (Any, torch.Tensor, torch.Tensor) -> Tuple[torch.Tensor, torch.Tensor]
-        r"""
-            Find the three nearest neighbors of unknown in known
-        Parameters
-        ----------
-        unknown : torch.Tensor
-            (B, n, 3) tensor of known features
-        known : torch.Tensor
-            (B, m, 3) tensor of unknown features
+    three_interpolate = ThreeInterpolate.apply
 
-        Returns
-        -------
-        dist : torch.Tensor
-            (B, n, 3) l2 distance to the three nearest neighbors
-        idx : torch.Tensor
-            (B, n, 3) index of 3 nearest neighbors
-        """
-        dist2, idx = _ext.three_nn(unknown, known)
+    class GroupingOperation(Function):
+        @staticmethod
+        def forward(ctx, features, idx):
+            B, nfeatures, nsample = idx.size()
+            _, C, N = features.size()
+            ctx.for_backwards = (idx, N)
+            return _ext.group_points(features, idx)
 
-        return torch.sqrt(dist2), idx
-
-    @staticmethod
-    def backward(ctx, a=None, b=None):
-        return None, None
+        @staticmethod
+        def backward(ctx, grad_out):
+            idx, N = ctx.for_backwards
+            grad_features = _ext.group_points_grad(grad_out.contiguous(), idx, N)
+            return grad_features, None
 
 
-three_nn = ThreeNN.apply
+    grouping_operation = GroupingOperation.apply
+
+    class BallQuery(Function):
+        @staticmethod
+        def forward(ctx, radius, nsample, xyz, new_xyz):
+            inds = _ext.ball_query(new_xyz, xyz, radius, nsample)
+            ctx.mark_non_differentiable(inds)
+            return inds
+
+        @staticmethod
+        def backward(ctx, a=None):
+            return None, None, None, None
 
 
-class ThreeInterpolate(Function):
-    @staticmethod
-    def forward(ctx, features, idx, weight):
-        # type(Any, torch.Tensor, torch.Tensor, torch.Tensor) -> Torch.Tensor
-        r"""
-            Performs weight linear interpolation on 3 features
-        Parameters
-        ----------
-        features : torch.Tensor
-            (B, c, m) Features descriptors to be interpolated from
-        idx : torch.Tensor
-            (B, n, 3) three nearest neighbors of the target features in features
-        weight : torch.Tensor
-            (B, n, 3) weights
-
-        Returns
-        -------
-        torch.Tensor
-            (B, c, n) tensor of the interpolated features
-        """
-        B, c, m = features.size()
-        n = idx.size(1)
-
-        ctx.three_interpolate_for_backward = (idx, weight, m)
-
-        return _ext.three_interpolate(features, idx, weight)
-
-    @staticmethod
-    def backward(ctx, grad_out):
-        # type: (Any, torch.Tensor) -> Tuple[torch.Tensor, torch.Tensor, torch.Tensor]
-        r"""
-        Parameters
-        ----------
-        grad_out : torch.Tensor
-            (B, c, n) tensor with gradients of ouputs
-
-        Returns
-        -------
-        grad_features : torch.Tensor
-            (B, c, m) tensor with gradients of features
-
-        None
-
-        None
-        """
-        idx, weight, m = ctx.three_interpolate_for_backward
-
-        grad_features = _ext.three_interpolate_grad(
-            grad_out.contiguous(), idx, weight, m
-        )
-
-        return grad_features, None, None
+    ball_query = BallQuery.apply
+else:
+    def furthest_point_sample(xyz, npoint):
+        return _torch_furthest_point_sample(xyz, npoint)
 
 
-three_interpolate = ThreeInterpolate.apply
+    def gather_operation(features, idx):
+        return _torch_gather_operation(features, idx)
 
 
-class GroupingOperation(Function):
-    @staticmethod
-    def forward(ctx, features, idx):
-        # type: (Any, torch.Tensor, torch.Tensor) -> torch.Tensor
-        r"""
-
-        Parameters
-        ----------
-        features : torch.Tensor
-            (B, C, N) tensor of features to group
-        idx : torch.Tensor
-            (B, npoint, nsample) tensor containing the indicies of features to group with
-
-        Returns
-        -------
-        torch.Tensor
-            (B, C, npoint, nsample) tensor
-        """
-        B, nfeatures, nsample = idx.size()
-        _, C, N = features.size()
-
-        ctx.for_backwards = (idx, N)
-
-        return _ext.group_points(features, idx)
-
-    @staticmethod
-    def backward(ctx, grad_out):
-        # type: (Any, torch.tensor) -> Tuple[torch.Tensor, torch.Tensor]
-        r"""
-
-        Parameters
-        ----------
-        grad_out : torch.Tensor
-            (B, C, npoint, nsample) tensor of the gradients of the output from forward
-
-        Returns
-        -------
-        torch.Tensor
-            (B, C, N) gradient of the features
-        None
-        """
-        idx, N = ctx.for_backwards
-
-        grad_features = _ext.group_points_grad(grad_out.contiguous(), idx, N)
-
-        return grad_features, None
+    def three_nn(unknown, known):
+        return _torch_three_nn(unknown, known)
 
 
-grouping_operation = GroupingOperation.apply
+    def three_interpolate(features, idx, weight):
+        return _torch_three_interpolate(features, idx, weight)
 
 
-class BallQuery(Function):
-    @staticmethod
-    def forward(ctx, radius, nsample, xyz, new_xyz):
-        # type: (Any, float, int, torch.Tensor, torch.Tensor) -> torch.Tensor
-        r"""
-
-        Parameters
-        ----------
-        radius : float
-            radius of the balls
-        nsample : int
-            maximum number of features in the balls
-        xyz : torch.Tensor
-            (B, N, 3) xyz coordinates of the features
-        new_xyz : torch.Tensor
-            (B, npoint, 3) centers of the ball query
-
-        Returns
-        -------
-        torch.Tensor
-            (B, npoint, nsample) tensor with the indicies of the features that form the query balls
-        """
-        inds = _ext.ball_query(new_xyz, xyz, radius, nsample)
-        ctx.mark_non_differentiable(inds)
-        return inds
-
-    @staticmethod
-    def backward(ctx, a=None):
-        return None, None, None, None
+    def grouping_operation(features, idx):
+        return _torch_grouping_operation(features, idx)
 
 
-ball_query = BallQuery.apply
+    def ball_query(radius, nsample, xyz, new_xyz):
+        return _torch_ball_query(radius, nsample, xyz, new_xyz)
 
 
 class QueryAndGroup(nn.Module):
