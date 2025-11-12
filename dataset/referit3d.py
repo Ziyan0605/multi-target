@@ -17,7 +17,7 @@ from utils.label_utils import LabelConverter
 from collections import Counter
 
 class Referit3DDataset(Dataset, LoadScannetMixin, DataAugmentationMixin):
-    def __init__(self, split='train', anno_type='nr3d', max_obj_len=60, num_points=1024, pc_type='gt', sem_type='607', filter_lang=False, sr3d_plus_aug=False):
+    def __init__(self, split='train', anno_type='nr3d', max_obj_len=60, num_points=1024, pc_type='gt', sem_type='607', filter_lang=False, sr3d_plus_aug=False, max_token_length=None):
         # make sure all input params is valid
         # use ground truth for training
         # test can be both ground truth and non-ground truth
@@ -34,22 +34,67 @@ class Referit3DDataset(Dataset, LoadScannetMixin, DataAugmentationMixin):
         # load file
         anno_file = os.path.join(SCAN_FAMILY_BASE, 'annotations/refer/' + anno_type + '.jsonl')
         split_file = os.path.join(SCAN_FAMILY_BASE, 'annotations/splits/scannetv2_'+ split + ".txt")
-        split_scan_ids = set([x.strip() for x in open(split_file, 'r')])
+        with open(split_file, 'r') as sf:
+            split_lines = [x.strip() for x in sf if x.strip()]
+        if split_lines and split_lines[0].startswith('version https://git-lfs.github.com/spec/v1'):
+            raise ValueError(
+                "The split file '{}' looks like a Git-LFS pointer. Please run "
+                "`git lfs pull dataset/scanfamily/annotations/splits` to download the actual list of scan ids."
+                .format(split_file)
+            )
+        split_scan_ids = set(split_lines)
         self.scan_ids = set() # scan ids in data
         self.data = [] # scanrefer data
+        def within_length_limit(tokens):
+            if max_token_length is None:
+                return True
+            return len(tokens) <= max_token_length
+
+        dropped_long_utterances = 0
+        dropped_other_split = 0
+
         with jsonlines.open(anno_file, 'r') as f:
             for item in f:
-                if item['scan_id'] in split_scan_ids and len(item['tokens']) <= 24:
+                if item['scan_id'] not in split_scan_ids:
+                    dropped_other_split += 1
+                    continue
+                if within_length_limit(item['tokens']):
                     self.scan_ids.add(item['scan_id'])
                     self.data.append(item)
+                else:
+                    dropped_long_utterances += 1
         # special for nr3d
         if sr3d_plus_aug and split == 'train':
             anno_file = os.path.join(SCAN_FAMILY_BASE, 'annotations/refer/' + 'sr3d+' + '.jsonl')
             with jsonlines.open(anno_file, 'r') as f:
                 for item in f:
-                    if item['scan_id'] in split_scan_ids and len(item['tokens']) <= 24:
+                    if item['scan_id'] not in split_scan_ids:
+                        dropped_other_split += 1
+                        continue
+                    if within_length_limit(item['tokens']):
                         self.scan_ids.add(item['scan_id'])
                         self.data.append(item)
+                    else:
+                        dropped_long_utterances += 1
+
+        if len(self.data) == 0:
+            msg = [
+                f"Referit3DDataset loaded 0 samples for split '{split}' and anno_type '{anno_type}'.",
+                "Possible causes:",
+                "  1) The ScanNet split file only contains Git-LFS metadata instead of scene ids.",
+                "  2) All utterances were filtered out by max_token_length.",
+                "  3) The annotation file path is empty or malformed.",
+            ]
+            if max_token_length is not None:
+                msg.append(
+                    f"     - Current max_token_length={max_token_length}, dropped {dropped_long_utterances} long utterances."
+                )
+            raise ValueError("\n".join(msg))
+
+        if dropped_long_utterances > 0 and max_token_length is not None:
+            print(
+                f"[Referit3DDataset] Warning: filtered out {dropped_long_utterances} utterances longer than {max_token_length} tokens."
+            )
         
         # fill parameters
         self.split = split
