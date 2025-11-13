@@ -6,14 +6,21 @@ from pipeline.registry import registry
 
 
 @registry.register_optimizer("refer_loss_v1")
-def get_refer_loss_v1(txt_cls_logits, obj_cls_post_logits, obj_cls_pre_logits, obj_cls_raw_logits, og3d_logits, tgt_object_label, tgt_object_id, obj_labels, obj_masks):
+def get_refer_loss_v1(txt_cls_logits, obj_cls_post_logits, obj_cls_pre_logits, obj_cls_raw_logits, og3d_logits, tgt_object_label, tgt_object_id, obj_labels, obj_masks, anchor_logits=None, anchor_labels=None, anchor_loss_weight=1.0):
     og3d_loss = F.cross_entropy(og3d_logits, tgt_object_id.squeeze(1))
     txt_cls_loss = F.cross_entropy(txt_cls_logits, tgt_object_label.squeeze(1))
     obj_cls_raw_loss = (F.cross_entropy(obj_cls_raw_logits.permute(0, 2, 1), obj_labels, reduction='none') * obj_masks).sum() / obj_masks.sum()
     obj_cls_pre_loss = (F.cross_entropy(obj_cls_pre_logits.permute(0, 2, 1), obj_labels, reduction='none') * obj_masks).sum() / obj_masks.sum()
     obj_cls_post_loss = (F.cross_entropy(obj_cls_post_logits.permute(0, 2, 1), obj_labels, reduction='none') * obj_masks).sum() / obj_masks.sum()
     total_loss = og3d_loss + txt_cls_loss + obj_cls_raw_loss + obj_cls_pre_loss + obj_cls_post_loss
-    return total_loss, og3d_loss, txt_cls_loss, obj_cls_raw_loss, obj_cls_pre_loss, obj_cls_post_loss
+    anchor_loss = og3d_loss.new_tensor(0.0)
+    if anchor_logits is not None and anchor_labels is not None:
+        mask = obj_masks.float()
+        valid_denominator = mask.sum().clamp(min=1.0)
+        anchor_loss_tensor = F.binary_cross_entropy_with_logits(anchor_logits, anchor_labels.float(), reduction='none')
+        anchor_loss = (anchor_loss_tensor * mask).sum() / valid_denominator
+        total_loss = total_loss + anchor_loss_weight * anchor_loss
+    return total_loss, og3d_loss, txt_cls_loss, obj_cls_raw_loss, obj_cls_pre_loss, obj_cls_post_loss, anchor_loss
 
 @registry.register_optimizer("qa_loss_v1")
 def get_qa_loss_v1(txt_cls_logits, obj_cls_post_logits, obj_cls_pre_logits, obj_cls_raw_logits, og3d_logits, answer_scores, tgt_object_label, tgt_object_id, obj_labels, obj_masks, answer_label):
