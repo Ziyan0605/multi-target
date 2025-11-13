@@ -7,6 +7,8 @@
 #SBATCH --output=output-%j.log
 #SBATCH --error=error-%j.log
 
+source ~/.bashrc
+
 # 1. 加载必要模块
 module load CUDA/11.3.1
 module load Miniforge3
