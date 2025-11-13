@@ -15,46 +15,54 @@ class AnchorHeadV1(nn.Module):
             nn.Dropout(dropout),
             nn.Linear(hidden_size, hidden_size)
         )
+        self.classifier = nn.Sequential(
+            nn.Linear(hidden_size, hidden_size),
+            nn.ReLU(),
+            nn.Dropout(dropout),
+            nn.Linear(hidden_size, 1)
+        )
         self.dropout = nn.Dropout(dropout)
 
-    def forward(self, obj_embeds, anchor_ids, anchor_masks):
-        """Aggregate anchor-conditioned features.
+    def forward(self, obj_embeds, obj_masks, anchor_labels=None):
+        """Predict anchor logits and aggregate anchor-aware context.
 
         Args:
             obj_embeds (torch.Tensor): object embeddings of shape (B, O, C).
-            anchor_ids (torch.Tensor): anchor indices of shape (B, A) padded with -1.
-            anchor_masks (torch.Tensor): boolean mask of shape (B, A) indicating valid anchors.
+            obj_masks (torch.Tensor): boolean mask of shape (B, O) for valid objects.
+            anchor_labels (torch.Tensor, optional): binary labels of shape (B, O).
+
         Returns:
-            torch.Tensor: aggregated anchor context of shape (B, C).
+            Tuple[torch.Tensor, torch.Tensor]:
+                - anchor logits of shape (B, O)
+                - anchor context of shape (B, C)
         """
         if obj_embeds.dim() != 3:
             raise ValueError("obj_embeds should have shape (B, O, C)")
 
-        batch_size, _, hidden_size = obj_embeds.shape
+        if obj_masks.dim() != 2:
+            raise ValueError("obj_masks should have shape (B, O)")
 
-        if anchor_ids.dim() == 1:
-            anchor_ids = anchor_ids.unsqueeze(0)
-        if anchor_masks.dim() == 1:
-            anchor_masks = anchor_masks.unsqueeze(0)
+        if obj_embeds.shape[:2] != obj_masks.shape:
+            raise ValueError("obj_masks must match the first two dimensions of obj_embeds")
 
-        if anchor_ids.shape[0] != batch_size:
-            raise ValueError("anchor_ids batch dimension mismatch with obj_embeds")
-        if anchor_masks.shape != anchor_ids.shape:
-            raise ValueError("anchor_masks must match anchor_ids shape")
+        batch_size, num_obj, hidden_size = obj_embeds.shape
+        obj_masks_bool = obj_masks.bool()
 
-        if anchor_ids.shape[1] == 0:
-            return obj_embeds.new_zeros(batch_size, hidden_size)
+        anchor_logits = self.classifier(obj_embeds).squeeze(-1)
+        anchor_logits = anchor_logits.masked_fill(~obj_masks_bool, -1e4)
 
-        valid_mask = anchor_masks.float()
-        if valid_mask.sum() == 0:
-            return obj_embeds.new_zeros(batch_size, hidden_size)
+        mask_float = obj_masks_bool.float()
+        if anchor_labels is not None:
+            if anchor_labels.shape != obj_masks.shape:
+                raise ValueError("anchor_labels must match obj_masks shape")
+            weights = anchor_labels.float() * mask_float
+        else:
+            weights = torch.sigmoid(anchor_logits) * mask_float
 
-        max_index = obj_embeds.shape[1] - 1
-        gather_index = anchor_ids.clamp(min=0, max=max_index).unsqueeze(-1).expand(-1, -1, hidden_size)
-        anchor_feats = torch.gather(obj_embeds, 1, gather_index)
-        anchor_feats = anchor_feats * valid_mask.unsqueeze(-1)
-        anchor_sum = anchor_feats.sum(dim=1)
-        denom = valid_mask.sum(dim=1, keepdim=True).clamp(min=1.0)
-        anchor_mean = anchor_sum / denom
-        anchor_mean = self.dropout(anchor_mean)
-        return self.proj(anchor_mean)
+        weights_sum = weights.sum(dim=1, keepdim=True)
+        denom = weights_sum.clamp(min=1e-6)
+        pooled = torch.bmm(weights.unsqueeze(1), obj_embeds).squeeze(1)
+        context = pooled / denom
+        context = self.dropout(context)
+        context = self.proj(context)
+        return anchor_logits, context

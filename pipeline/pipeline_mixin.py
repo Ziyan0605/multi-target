@@ -347,14 +347,27 @@ class ModelEvaluationMixin(object):
 
 class ModelLossMixin(object):
     def get_refer_loss(self, data_dict):
-        total_loss, og3d_loss, txt_cls_loss, obj_cls_raw_loss, obj_cls_pre_loss, obj_cls_post_loss = self.refer_loss(data_dict['txt_cls_logits'], data_dict['obj_cls_post_logits'], data_dict['obj_cls_pre_logits'], data_dict['obj_cls_raw_logits'], data_dict['og3d_logits'], 
-                                  data_dict['tgt_object_label'], data_dict['tgt_object_id'], data_dict['obj_labels'], data_dict['obj_masks'])
+        total_loss, og3d_loss, txt_cls_loss, obj_cls_raw_loss, obj_cls_pre_loss, obj_cls_post_loss, anchor_loss = self.refer_loss(
+            data_dict['txt_cls_logits'],
+            data_dict['obj_cls_post_logits'],
+            data_dict['obj_cls_pre_logits'],
+            data_dict['obj_cls_raw_logits'],
+            data_dict['og3d_logits'],
+            data_dict['tgt_object_label'],
+            data_dict['tgt_object_id'],
+            data_dict['obj_labels'],
+            data_dict['obj_masks'],
+            anchor_logits=data_dict.get('anchor_logits'),
+            anchor_labels=data_dict.get('anchor_labels'),
+            anchor_loss_weight=getattr(self, 'anchor_loss_weight', 1.0),
+        )
         data_dict['total_loss'] = total_loss
         data_dict['og3d_loss'] = og3d_loss
         data_dict['txt_cls_loss'] = txt_cls_loss
         data_dict['obj_cls_raw_loss'] = obj_cls_raw_loss
         data_dict['obj_cls_pre_loss'] = obj_cls_pre_loss
         data_dict['obj_cls_post_loss'] = obj_cls_post_loss
+        data_dict['anchor_loss'] = anchor_loss
         return data_dict
     
     def get_qa_loss(self, data_dict):

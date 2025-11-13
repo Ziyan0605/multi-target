@@ -276,6 +276,12 @@ class Referit3DDataset(Dataset, LoadScannetMixin, DataAugmentationMixin):
                 if anchor_idx in original_to_final:
                     anchor_final_indices.append(original_to_final[anchor_idx])
 
+        anchor_label_vector = np.zeros(len(obj_pcds), dtype=np.float32)
+        if anchor_final_indices:
+            for anchor_idx in anchor_final_indices:
+                if 0 <= anchor_idx < anchor_label_vector.shape[0]:
+                    anchor_label_vector[anchor_idx] = 1.0
+
         # rotate obj
         rot_matrix = self.build_rotate_mat()
         
@@ -342,6 +348,7 @@ class Referit3DDataset(Dataset, LoadScannetMixin, DataAugmentationMixin):
             'is_view_dependent': is_view_dependent,
             'is_hard': is_hard,
             'anchor_ids': torch.LongTensor(anchor_final_indices),
+            'anchor_labels': torch.from_numpy(anchor_label_vector),
         }
     
         return data_dict

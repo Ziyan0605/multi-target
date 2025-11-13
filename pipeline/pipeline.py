@@ -45,10 +45,11 @@ class OptimusPrimePipeline(Pipeline, NormalDataloaderMixin, ModelOptimizationMix
         self.qa_head = registry.get_other_model(cfg['qa_head']['name'])(**cfg['qa_head']['args']).cuda()
         self.pretrain_head = registry.get_other_model(cfg['pretrain_head']['name'])(**cfg['pretrain_head']['args']).cuda()
         self.caption_head = registry.get_other_model(cfg['caption_head']['name'])(**cfg['caption_head']['args']).cuda()
-        
+
         # load task
         self.task = cfg['task']
         self.eval_task = cfg['eval_task']
+        self.anchor_loss_weight = 1.0
         
         # build dataset
         if self.task == 'scanrefer' or self.task == 'referit3d':
@@ -110,7 +111,9 @@ class OptimusPrimePipeline(Pipeline, NormalDataloaderMixin, ModelOptimizationMix
        
         # build loss function
         if self.task == 'scanrefer' or self.task == 'referit3d':
-            self.refer_loss = registry.get_optimizer(cfg["refer_loss"]['name'])
+            refer_loss_cfg = cfg["refer_loss"]
+            self.refer_loss = registry.get_optimizer(refer_loss_cfg['name'])
+            self.anchor_loss_weight = refer_loss_cfg.get('args', {}).get('anchor_loss_weight', self.anchor_loss_weight)
         elif self.task == 'scanqa' or self.task == 'sqa':
             self.qa_loss = registry.get_optimizer(cfg["qa_loss"]['name'])
         elif self.task == 'caption':
@@ -225,19 +228,28 @@ class OptimusPrimePipeline(Pipeline, NormalDataloaderMixin, ModelOptimizationMix
             language_fuse_feature, point_fuse_feature  = self.unified_encoder(lang_basic_features, data_dict['txt_masks'], point_basic_features, data_dict['obj_locs'], data_dict['obj_masks'])
         
         # task head
-        anchor_context = None
-        if 'anchor_ids' in data_dict and 'anchor_masks' in data_dict:
-            anchor_context = self.anchor_head(point_fuse_feature, data_dict['anchor_ids'], data_dict['anchor_masks'])
-        txt_cls_logits, obj_cls_post_logits, obj_cls_pre_logits, og3d_logits = self.ground_head(language_fuse_feature, point_fuse_feature, point_features_pre, data_dict['obj_masks'], anchor_context)
+        anchor_logits, anchor_context = self.anchor_head(
+            point_fuse_feature,
+            data_dict['obj_masks'],
+            data_dict.get('anchor_labels')
+        )
+        txt_cls_logits, obj_cls_post_logits, obj_cls_pre_logits, og3d_logits = self.ground_head(
+            language_fuse_feature,
+            point_fuse_feature,
+            point_features_pre,
+            data_dict['obj_masks'],
+            anchor_context
+        )
         answer_scores = self.qa_head(point_fuse_feature, data_dict['obj_masks'], language_fuse_feature, data_dict['txt_masks'])
         txt_lm_cls_logits, scene_txt_match_logit = self.pretrain_head(language_fuse_feature)
         txt_caption_cls_logit = self.caption_head(language_fuse_feature)
-        
+
         data_dict['txt_cls_logits'] = txt_cls_logits
         data_dict['obj_cls_post_logits'] = obj_cls_post_logits
         data_dict['obj_cls_pre_logits'] = obj_cls_pre_logits
         data_dict['obj_cls_raw_logits'] = obj_cls_raw_logits
         data_dict['og3d_logits'] = og3d_logits
+        data_dict['anchor_logits'] = anchor_logits
         data_dict['answer_scores'] = answer_scores
         data_dict['txt_lm_cls_logits'] = txt_lm_cls_logits
         data_dict['scene_txt_match_logit'] = scene_txt_match_logit
@@ -290,6 +302,7 @@ class OptimusPrimePipeline(Pipeline, NormalDataloaderMixin, ModelOptimizationMix
                 # loss
                 'og3d_loss': data_dict['og3d_loss'].item(),
                 'txt_cls_loss': data_dict['txt_cls_loss'].item(),
+                'anchor_loss': data_dict['anchor_loss'].item(),
                 # acc
                 'og_acc': data_dict['og_acc'],
                 'txt_acc': data_dict['txt_acc'],
@@ -335,21 +348,21 @@ class OptimusPrimePipeline(Pipeline, NormalDataloaderMixin, ModelOptimizationMix
     
     def restore_model(self):
         state_dict = self.saver.restore_dict()
-        self.lang_encoder.load_state_dict(state_dict['lang_encoder'])
-        self.point_encoder.load_state_dict(state_dict['point_encoder'])
-        self.unified_encoder.load_state_dict(state_dict['unified_encoder'])
+        self.lang_encoder.load_state_dict(state_dict['lang_encoder'], strict=False)
+        self.point_encoder.load_state_dict(state_dict['point_encoder'], strict=False)
+        self.unified_encoder.load_state_dict(state_dict['unified_encoder'], strict=False)
         if 'anchor_head' in state_dict:
-            self.anchor_head.load_state_dict(state_dict['anchor_head'])
+            self.anchor_head.load_state_dict(state_dict['anchor_head'], strict=False)
         else:
             print("anchor_head params not found in checkpoint, using initialization")
-        self.ground_head.load_state_dict(state_dict['ground_head'])
+        self.ground_head.load_state_dict(state_dict['ground_head'], strict=False)
         try:
-            self.qa_head.load_state_dict(state_dict['qa_head'])
-        except: 
+            self.qa_head.load_state_dict(state_dict['qa_head'], strict=False)
+        except:
             print("fail to load qa params")
-        self.pretrain_head.load_state_dict(state_dict['pretrain_head'])
+        self.pretrain_head.load_state_dict(state_dict['pretrain_head'], strict=False)
         try:
-            self.caption_head.load_state_dict(state_dict['caption_head'])
+            self.caption_head.load_state_dict(state_dict['caption_head'], strict=False)
         except:
             print("fail to load caption params")
     

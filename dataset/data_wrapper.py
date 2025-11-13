@@ -68,6 +68,10 @@ class ScanFamilyDatasetWrapper(torch.utils.data.Dataset):
                 anchor_ids = anchor_ids[:max_anchor_len]
             data_dict['anchor_ids'] = anchor_ids
             data_dict['anchor_masks'] = anchor_mask
+        if data_dict.get('anchor_labels') is not None:
+            anchor_labels = data_dict['anchor_labels'].float()
+            anchor_labels = self.pad_tensors(anchor_labels, lens=self.max_obj_len, pad=0.0).float()
+            data_dict['anchor_labels'] = anchor_labels
         # build label for qa
         if "answer_label" in data_dict:
             data_dict['answer_label'] = data_dict['answer_label'].long() # N, C

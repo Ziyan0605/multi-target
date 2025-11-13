@@ -75,6 +75,8 @@ pipeline:
 
   refer_loss:
     name: refer_loss_v1
+    args:
+      anchor_loss_weight: 1.0
 
   logger:
     name: tensorboard_logger
