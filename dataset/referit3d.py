@@ -17,7 +17,7 @@ from utils.lfs_utils import ensure_not_lfs_pointer
 from collections import Counter
 
 class Referit3DDataset(Dataset, LoadScannetMixin, DataAugmentationMixin):
-    def __init__(self, split='train', anno_type='nr3d', max_obj_len=60, num_points=1024, pc_type='gt', sem_type='607', filter_lang=False, sr3d_plus_aug=False, max_token_length=None):
+    def __init__(self, split='train', anno_type='nr3d', max_obj_len=80, num_points=1024, pc_type='gt', sem_type='607', filter_lang=False, sr3d_plus_aug=False, max_token_length=None):
         # make sure all input params is valid
         # use ground truth for training
         # test can be both ground truth and non-ground truth
@@ -61,6 +61,7 @@ class Referit3DDataset(Dataset, LoadScannetMixin, DataAugmentationMixin):
             )
         self.scan_ids = set() # scan ids in data
         self.data = [] # scanrefer data
+
         def within_length_limit(tokens):
             if max_token_length is None:
                 return True
@@ -79,6 +80,8 @@ class Referit3DDataset(Dataset, LoadScannetMixin, DataAugmentationMixin):
                     self.data.append(item)
                 else:
                     dropped_long_utterances += 1
+
+
         # special for nr3d
         if sr3d_plus_aug and split == 'train':
             anno_file = os.path.join(SCAN_FAMILY_BASE, 'annotations/refer/' + 'sr3d+' + '.jsonl')
@@ -146,12 +149,29 @@ class Referit3DDataset(Dataset, LoadScannetMixin, DataAugmentationMixin):
         tgt_object_name = item['instance_type']
         sentence = item['utterance']
         is_view_dependent = is_explicitly_view_dependent(item['tokens'])
+
         anchor_original_ids = []
-        for anchor_group in item.get('anchor_ids', []):
-            for anchor_idx in anchor_group:
-                anchor_idx = int(anchor_idx)
-                if anchor_idx not in anchor_original_ids:
-                    anchor_original_ids.append(anchor_idx)
+        raw_anchor_ids = item.get('anchor_ids', [])
+
+        if isinstance(raw_anchor_ids, int):
+            candidates = [raw_anchor_ids]
+        elif isinstance(raw_anchor_ids, list):
+            candidates = []
+            for elem in raw_anchor_ids:
+                if isinstance(elem, int):
+                    candidates.append(elem)
+                elif isinstance(elem, (list, tuple)):
+                    for x in elem:
+                        if isinstance(x, int):
+                            candidates.append(x)
+        else:
+            candidates = []
+
+        for anchor_idx in candidates:
+            anchor_idx = int(anchor_idx)
+            if anchor_idx not in anchor_original_ids:
+                anchor_original_ids.append(anchor_idx)
+        # === ANCHOR END ===
         
         # load pcds and labels
         if self.pc_type == 'gt':

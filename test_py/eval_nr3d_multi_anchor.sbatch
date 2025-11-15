@@ -1,11 +1,13 @@
 #!/bin/bash
 #SBATCH --job-name=train_nr3d
-#SBATCH --time=12:00:00
+#SBATCH --time=02:00:00
 #SBATCH --gres=gpu:v100:1
 #SBATCH --cpus-per-task=4
 #SBATCH --mem=48G
 #SBATCH --output=output-%j.log
 #SBATCH --error=error-%j.log
+
+echo "=== Starting Multi-Anchor Evaluation ==="
 
 source ~/.bashrc
 
@@ -24,5 +26,4 @@ cd "${SLURM_SUBMIT_DIR:-$PWD}"
 python3 -c "import torch; print('✅ PyTorch version:', torch.__version__)" || exit 1
 
 # 5. 启动训练
-python3 run.py --config project/vista/nr3d_config.yml
-
+python3 run.py --config project/vista/nr3d_multi_anchor_eval.yml

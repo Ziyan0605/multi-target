@@ -1,7 +1,7 @@
 pipeline:
   name: optimus_prime
   task: referit3d
-  eval_task: true
+  eval_task: False
   restore_model: true
   refer_dataset:
     name: referit3d_task
@@ -12,12 +12,13 @@ pipeline:
       anchor_seq_length: 8
       anno_type: 'nr3d-multi'
       pc_type: 'gt'
-      sr3d_plus_aug: True
+      sr3d_plus_aug: False
 
   lang_encoder:
     name: bert_lang_encoder
     args:
       num_hidden_layer: 4
+      
   point_encoder:
     name: point_tokenize_encoder
     args:
@@ -33,6 +34,7 @@ pipeline:
       mixup_strategy: linear_decay
       mixup_stage1: 0.2
       mixup_stage2: 0.4
+      
   unified_encoder:
     name: unified_encoder_v2
     args:
@@ -54,39 +56,46 @@ pipeline:
       hidden_size: 768
       sem_cls_size: 607
       dropout: 0.3
+      
   qa_head:
     name: qa_head_v1
     args:
       num_answers: 8864
+      
   pretrain_head:
     name: pretrain_head_v1
     args:
       hidden_size: 768
       vocab_size: 30522
+      
   caption_head:
     name: caption_head_v1
     args:
       hidden_size: 768
       vocab_size: 4231
+      
   refer_loss:
     name: refer_loss_v1
     args:
-      anchor_loss_weight: 1.0
+      anchor_loss_weight: 0
   
   logger:
     name: tensorboard_logger
     args:
       log_dir: ../runs/
+      
   saver:
     name: model_saver
     args:
-      save_name: model.pth
-      load_dir: project/pretrain_weights
-      load_name: nr3d.pth
-  batch_size: 2
+      save_dir: project/checkpoints
+      save_name: model-weight0-epoch20.pth
+      load_dir: null
+      load_name: null
+      
+  batch_size: 4
   learning_rate: 0.0001
   grad_norm: 5.0
-  epochs: 1
+  epochs: 10
   warmup_steps: 5000
   lang_lr_mul: 0.1
   point_lr_mul: 1.0
